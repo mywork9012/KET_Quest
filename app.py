@@ -297,7 +297,7 @@ with st.sidebar:
     <div class="sidebar-header">
       <div style="font-size:1.8rem">🎯</div>
       <div style="font-size:1.2rem;font-weight:800">KET 冲刺背词</div>
-      <div style="font-size:0.8rem;opacity:0.85">四年级 · 4个月闭环备考</div>
+      <div style="font-size:0.8rem;opacity:0.85">4个月闭环备考</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -370,7 +370,7 @@ if not st.session_state.username:
       <div style="font-size:4rem">🎯</div>
       <h1 style="font-size:2.5rem;font-weight:800;color:#667eea">KET 冲刺背词</h1>
       <p style="font-size:1.2rem;color:#718096;margin:16px 0">
-        四年级 · 已过剑桥三级 · 4个月闭环冲刺 KET
+        已过剑桥三级 · 4个月闭环冲刺 KET
       </p>
       <p style="color:#a0aec0">← 在左侧输入你的名字开始学习</p>
     </div>
