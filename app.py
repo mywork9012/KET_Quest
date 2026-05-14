@@ -420,15 +420,22 @@ if page == "home":
       📅 今日计划 · 第 {plan['day']} 天
     </h2>
     <p style="color:#718096">备考倒计时 <b>{plan['days_left']}</b> 天 &nbsp;·&nbsp;
-    <span style="color:{stage['color']};font-weight:700">{stage['name']} · {stage['label']}</span></p>
+    <span style="color:{stage['color']};font-weight:700">{stage['name']} · {stage['label']}</span>
+    &nbsp;·&nbsp; 还剩 <b>{plan['unseen_total']}</b> 个词未学</p>
     """, unsafe_allow_html=True)
 
-    st.progress(min(plan["day"] / 120, 1.0), text=f"总进度 {plan['day']/120:.0%}")
+    # 词库总进度（已接触 / 总词数）
+    touched = stats["total"] - stats["new"]
+    st.progress(
+        min(touched / stats["total"], 1.0),
+        text=f"词库进度 {touched}/{stats['total']}（已接触单词数）"
+    )
     st.info(plan["tips"])
 
+    # 4个数据卡片
     c1, c2, c3, c4 = st.columns(4)
     for col, num, label in [
-        (c1, plan["new_count"], "今日新词"),
+        (c1, plan["new_count"] if not plan["all_done"] else "🎊", "今日推荐新词"),
         (c2, stats["review_due"], "待复习"),
         (c3, stats["known"], "已掌握"),
         (c4, f"{stats['accuracy']:.0%}", "正确率"),
@@ -441,22 +448,26 @@ if page == "home":
             </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("### 📚 今日新词")
-    cols = st.columns(4)
-    for i, w in enumerate(plan["new_words"]):
-        prog = all_progress.get(w["id"])
-        status = prog["status"] if prog else "new"
-        icon = {"known":"✅","learning":"📖","new":"🆕"}.get(status,"🆕")
-        with cols[i % 4]:
-            st.markdown(f"""
-            <div style="background:white;border-radius:12px;padding:12px;
-                        box-shadow:0 3px 10px rgba(0,0,0,0.07);margin-bottom:8px;
-                        border-top:3px solid #667eea">
-              <div style="font-size:1.05rem;font-weight:800;color:#2d3748">{w['word']}</div>
-              <div style="font-size:0.78rem;color:#718096">{w['phonetic']}</div>
-              <div style="font-size:0.88rem;color:#4a5568;font-weight:600;margin-top:3px">{w['meaning']}</div>
-              <div style="font-size:0.75rem;margin-top:4px">{icon} {status}</div>
-            </div>""", unsafe_allow_html=True)
+
+    if plan["all_done"]:
+        st.success("🎊 198个单词全部学过了！保持每天复习，冲刺KET！")
+    else:
+        st.markdown(f"### 📚 今日推荐新词（{plan['new_count']} 个）")
+        cols = st.columns(4)
+        for i, w in enumerate(plan["new_words"]):
+            prog = all_progress.get(w["id"])
+            status = prog["status"] if prog else "new"
+            icon = {"known":"✅","learning":"📖","new":"🆕"}.get(status,"🆕")
+            with cols[i % 4]:
+                st.markdown(f"""
+                <div style="background:white;border-radius:12px;padding:12px;
+                            box-shadow:0 3px 10px rgba(0,0,0,0.07);margin-bottom:8px;
+                            border-top:3px solid #667eea">
+                  <div style="font-size:1.05rem;font-weight:800;color:#2d3748">{w['word']}</div>
+                  <div style="font-size:0.78rem;color:#718096">{w['phonetic']}</div>
+                  <div style="font-size:0.88rem;color:#4a5568;font-weight:600;margin-top:3px">{w['meaning']}</div>
+                  <div style="font-size:0.75rem;margin-top:4px">{icon}</div>
+                </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 🗺️ 备考路线图")
@@ -483,7 +494,8 @@ if page == "home":
     b1, b2, b3, b4 = st.columns(4)
     if b1.button("📖 学新词", use_container_width=True, type="primary"):
         st.session_state.page = "learn"
-        st.session_state.study_words = plan["new_words"]
+        # 每次进入学新词页面，重新从未学词中取，不依赖旧session
+        st.session_state.study_words = []
         st.session_state.study_idx = 0
         st.rerun()
     if b2.button("🔄 复习单词", use_container_width=True):
@@ -502,8 +514,18 @@ if page == "home":
 # ═══════════════════════════════════════════════════════
 
 elif page == "learn":
+    # ── 核心修复：每次进入页面都从数据库重新取未学词 ──────────────────
+    # 不依赖 session_state 缓存，确保学完一批后继续加载新词
     plan = get_today_plan(uname, user["start_date"])
+
+    # study_words 为空或已全部标记过（都在 progress 里）→ 重新取
     if not st.session_state.study_words:
+        if plan["all_done"]:
+            st.success("🎊 恭喜！198个单词已全部学过！请继续保持每日复习。")
+            if st.button("去复习单词 →", type="primary"):
+                st.session_state.page = "review"
+                st.rerun()
+            st.stop()
         st.session_state.study_words = plan["new_words"]
         st.session_state.study_idx = 0
 
@@ -512,43 +534,102 @@ elif page == "learn":
     total = len(words_to_study)
 
     render_hud(prof)
-    st.markdown(f"### 📖 学新词 &nbsp;<span style='color:#a0aec0;font-size:1rem'>{min(idx+1,total)} / {total}</span>",
-                unsafe_allow_html=True)
+
+    # 顶部信息栏：当前批次进度 + 总剩余
+    st.markdown(
+        f"### 📖 学新词 &nbsp;"
+        f"<span style='color:#a0aec0;font-size:1rem'>"
+        f"本批 {min(idx+1,total)}/{total} &nbsp;·&nbsp; "
+        f"还剩 {plan['unseen_total']} 词未学</span>",
+        unsafe_allow_html=True
+    )
     st.progress((idx + 1) / total)
 
     word = words_to_study[idx]
-    prog = all_progress.get(word["id"])
+    # 每次翻到新词刷新进度（因为上一批学了之后 all_progress 变了）
+    current_progress = get_all_progress(uname)
+    prog = current_progress.get(word["id"])
 
-    # 自动朗读单词
     auto_play(word["word"], rate=0.8)
-
     render_word_card(word, prog, show_tts=True)
+
+    # ── 掌握进度提示（让孩子知道需要连续答对5次才算掌握）──────────
+    streak  = prog["streak"]  if prog else 0
+    correct = prog["correct"] if prog else 0
+    status  = prog["status"]  if prog else "new"
+    bar_pct = min(streak / 5, 1.0)
+    bar_color = "#48bb78" if status == "known" else "#667eea"
+    status_label = {
+        "new":      "🆕 还没学过",
+        "learning": f"📖 已答对 {streak}/5 次（连续答对5次即掌握✅）",
+        "known":    "✅ 已掌握！",
+    }.get(status, "")
+    st.markdown(f"""
+    <div style="margin:10px 0 4px">
+      <div style="display:flex;justify-content:space-between;
+                  font-size:0.82rem;color:#718096;margin-bottom:4px">
+        <span>{status_label}</span>
+        <span>累计答对 {correct} 次</span>
+      </div>
+      <div style="background:#e2e8f0;border-radius:20px;height:8px;overflow:hidden">
+        <div style="width:{bar_pct*100:.0f}%;height:100%;
+                    background:{bar_color};border-radius:20px;
+                    transition:width 0.4s ease"></div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("---")
     c1, c2, c3, c4 = st.columns(4)
+
     if c1.button("⬅️ 上一个", use_container_width=True, disabled=(idx == 0)):
         st.session_state.study_idx -= 1
         st.rerun()
+
     if c2.button("✅ 已会了", use_container_width=True, type="primary"):
         r = handle_answer(uname, word["id"], True, "learn")
         show_result_banner({**r, "correct": True})
         if idx < total - 1:
             st.session_state.study_idx += 1
         st.rerun()
+
     if c3.button("🔄 再看看", use_container_width=True):
-        r = handle_answer(uname, word["id"], False, "learn")
+        handle_answer(uname, word["id"], False, "learn")
         if idx < total - 1:
             st.session_state.study_idx += 1
         st.rerun()
+
     if c4.button("➡️ 下一个", use_container_width=True, disabled=(idx >= total - 1)):
         st.session_state.study_idx += 1
         st.rerun()
 
+    # ── 本批学完后的选项 ──────────────────────────────────────────────
     if idx >= total - 1:
-        st.success("🎉 今日新词全部学完！")
-        if st.button("去做选择题巩固 →", type="primary"):
-            st.session_state.page = "quiz"
-            st.rerun()
+        st.success(f"🎉 本批 {total} 个词学完了！")
+
+        # 重新查剩余未学词
+        fresh_plan = get_today_plan(uname, user["start_date"])
+        remaining = fresh_plan["unseen_total"]
+
+        if remaining > 0:
+            st.info(f"📚 词库还有 **{remaining}** 个词等你学，继续吗？")
+            ca, cb, cc = st.columns(3)
+            if ca.button("📖 继续学下一批", use_container_width=True, type="primary"):
+                # 清空 study_words，下次进入自动取新的一批
+                st.session_state.study_words = []
+                st.session_state.study_idx = 0
+                st.rerun()
+            if cb.button("🧩 先做选择题巩固", use_container_width=True):
+                st.session_state.page = "quiz"
+                st.rerun()
+            if cc.button("🔄 去复习", use_container_width=True):
+                st.session_state.page = "review"
+                st.rerun()
+        else:
+            st.success("🎊 太厉害了！198个单词全部学过！")
+            if st.button("🔄 去复习巩固 →", type="primary"):
+                st.session_state.page = "review"
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════
@@ -795,21 +876,26 @@ elif page == "fill":
     if len(pool) < 4:
         pool = [w for w in all_words if w.get("sentence1")][:30]
 
-    if not st.session_state.fill_word or st.session_state.fill_answered:
-        st.session_state.fill_word = random.choice(pool)
+    # ── 修复：只在 fill_word 为 None 时才重新出题 ──────────────
+    # 旧逻辑 "or fill_answered" 导致答题后立刻清空，反馈界面永不显示
+    if st.session_state.fill_word is None:
+        w = random.choice(pool)
+        st.session_state.fill_word = w
+        # 固定选句存入 state，避免每次 rerun 随机结果不同
+        if w.get("sentence2") and random.random() > 0.5:
+            st.session_state.fill_sent    = w["sentence2"]
+            st.session_state.fill_sent_cn = w["sentence2_cn"]
+        else:
+            st.session_state.fill_sent    = w["sentence1"]
+            st.session_state.fill_sent_cn = w["sentence1_cn"]
         st.session_state.fill_answered = False
-        st.session_state.fill_result = None
+        st.session_state.fill_result   = None
 
-    word = st.session_state.fill_word
+    word     = st.session_state.fill_word
     answered = st.session_state.fill_answered
-
-    # 随机选例句
-    if word.get("sentence2") and random.random() > 0.5:
-        sent = word["sentence2"]
-        sent_cn = word["sentence2_cn"]
-    else:
-        sent = word["sentence1"]
-        sent_cn = word["sentence1_cn"]
+    # 读取固定的例句（不再随机）
+    sent    = st.session_state.get("fill_sent",    word.get("sentence1", ""))
+    sent_cn = st.session_state.get("fill_sent_cn", word.get("sentence1_cn", ""))
 
     blank_sent = re.sub(r'\*\*(.+?)\*\*', '______', sent)
     match = re.search(r'\*\*(.+?)\*\*', sent)
@@ -855,7 +941,10 @@ elif page == "fill":
                    "🔊 听完整例句", rate=0.8, key=f"fill_tts_{word['id']}")
 
         if st.button("➡️ 下一题", type="primary", use_container_width=True):
-            st.session_state.fill_word = None
+            # 置 None 即触发顶部重新出题逻辑
+            st.session_state.fill_word    = None
+            st.session_state.fill_sent    = None
+            st.session_state.fill_sent_cn = None
             st.session_state.fill_answered = False
             st.rerun()
 
@@ -910,28 +999,25 @@ elif page == "arcade":
             st.rerun()
         st.stop()
 
-    # 出题
+    # 出题：只在 arcade_word 为 None 时出新题，避免答题后反馈被清空
     pool = [w for w in all_words if w["id"] in all_progress] or all_words[:40]
-    if not st.session_state.arcade_word or st.session_state.arcade_answered:
+    if st.session_state.arcade_word is None:
         w = random.choice(pool)
         same_pos = [x for x in pool if x["part"] == w["part"] and x["id"] != w["id"]]
         dist_pool = same_pos if len(same_pos) >= 3 else pool
         distractors = random.sample([x for x in dist_pool if x["id"] != w["id"]], 3)
         choices = [w] + distractors
         random.shuffle(choices)
-        st.session_state.arcade_word = w
-        st.session_state.arcade_choices = choices
+        st.session_state.arcade_word     = w
+        st.session_state.arcade_choices  = choices
         st.session_state.arcade_answered = False
-        st.session_state.arcade_result = None
+        st.session_state.arcade_result   = None
 
     word = st.session_state.arcade_word
     choices = st.session_state.arcade_choices
     answered = st.session_state.arcade_answered
 
-    # 随机切换题型增加趣味性
-    mode = random.choice(["cn2en", "en2cn"]) if not answered else \
-           ("cn2en" if "中文" in str(st.session_state.arcade_result or "") else "en2cn")
-    # 用word_id保持同一题同一模式
+    # 题型由 word_id 奇偶决定，保证同一道题前后一致
     mode = "cn2en" if word["id"] % 2 == 0 else "en2cn"
 
     if mode == "cn2en":
@@ -982,8 +1068,9 @@ elif page == "arcade":
                    key=f"arc_ans_tts_{word['id']}")
 
         if st.button("➡️ 继续", type="primary", use_container_width=True):
-            st.session_state.arcade_answered = True
-            st.session_state.arcade_word = None
+            # word 置 None 触发出新题；answered 置 False 清除答题状态
+            st.session_state.arcade_word     = None
+            st.session_state.arcade_answered = False
             st.rerun()
 
 
