@@ -22,6 +22,7 @@ from utils.db import (
     get_stats, log_fill, get_weak_words, get_word_by_id,
     get_game_profile, get_level_info, award_xp,
     check_and_award_badges, get_earned_badges, BADGE_DEFS, LEVEL_XP,
+    arcade_upsert, get_arcade_pool,
 )
 from utils.planner import get_today_plan, STAGES
 from utils.tts import tts_button, tts_button_small, auto_play
@@ -245,6 +246,16 @@ def render_hud(prof: dict):
     """, unsafe_allow_html=True)
 
 
+def sample_distractors(current: dict, pool: list[dict], all_words: list, count: int = 3) -> list[dict]:
+    """从候选词池中抽取干扰项。如果候选数量不足则回退到所有词池。"""
+    candidates = [x for x in pool if x["id"] != current["id"]]
+    if len(candidates) < count:
+        fallback = [x for x in all_words if x["id"] != current["id"]]
+        if len(fallback) >= count:
+            candidates = fallback
+    return random.sample(candidates, count) if len(candidates) >= count else candidates
+
+
 def handle_answer(username: str, word_id: int, correct: bool, mode: str = "quiz"):
     """统一答题处理：更新进度、XP、连击、徽章，返回结算dict"""
     # 更新连击
@@ -304,6 +315,16 @@ _ss("review_ids", []); _ss("review_idx", 0); _ss("review_phase", "show")
 _ss("arcade_score", 0); _ss("arcade_lives", 3); _ss("arcade_word", None)
 _ss("arcade_choices", []); _ss("arcade_answered", False); _ss("arcade_result", None)
 _ss("perfect_streak", 0)   # 用于 perfect_quiz 徽章
+_ss("topic_page", "topic_home")
+_ss("topic_sel", None)
+_ss("topic_practice_scope", "全部词")
+_ss("topic_quiz_active", False)
+_ss("topic_quiz_topic", "全部")
+_ss("topic_quiz_scope", "全部词")
+_ss("topic_quiz_word", None)
+_ss("topic_quiz_choices", [])
+_ss("topic_quiz_answered", False)
+_ss("topic_quiz_result", None)
 
 
 # ═══════════════════════════════════════════════════════
@@ -358,6 +379,7 @@ with st.sidebar:
             ("🧩","选择题练习","quiz"),
             ("✏️","填空练习","fill"),
             ("🕹️","闯关游戏","arcade"),
+            ("📚","分主题练习","topics"),
             ("📊","我的进度","stats"),
             ("🏅","我的徽章","badges"),
             ("📋","词库浏览","wordlist"),
@@ -750,8 +772,7 @@ elif page == "quiz":
         w = random.choice(pool)
         same_pos = [x for x in pool if x["part"] == w["part"] and x["id"] != w["id"]]
         distractors_pool = same_pos if len(same_pos) >= 3 else pool
-        distractors = random.sample(
-            [x for x in distractors_pool if x["id"] != w["id"]], 3)
+        distractors = sample_distractors(w, distractors_pool, all_words, 3)
         choices = [w] + distractors
         random.shuffle(choices)
         st.session_state.quiz_word = w
@@ -1000,12 +1021,15 @@ elif page == "arcade":
         st.stop()
 
     # 出题：只在 arcade_word 为 None 时出新题，避免答题后反馈被清空
-    pool = [w for w in all_words if w["id"] in all_progress] or all_words[:40]
+    # get_arcade_pool 会自动排除已掌握(known)的词，3次答对即掌握
+    pool = get_arcade_pool(uname, [w for w in all_words if w["id"] in all_progress] or all_words[:40])
+    if not pool:
+        pool = all_words[:40]
     if st.session_state.arcade_word is None:
         w = random.choice(pool)
         same_pos = [x for x in pool if x["part"] == w["part"] and x["id"] != w["id"]]
         dist_pool = same_pos if len(same_pos) >= 3 else pool
-        distractors = random.sample([x for x in dist_pool if x["id"] != w["id"]], 3)
+        distractors = sample_distractors(w, dist_pool, all_words, 3)
         choices = [w] + distractors
         random.shuffle(choices)
         st.session_state.arcade_word     = w
@@ -1042,22 +1066,27 @@ elif page == "arcade":
                 label = f"**{c['word']}**" if mode == "cn2en" else f"**{c['meaning']}**"
                 if st.button(label, key=f"arc_{c['id']}", use_container_width=True):
                     is_correct = (c["id"] == word["id"])
+                    arc_r = arcade_upsert(uname, word["id"], is_correct)
+                    r = handle_answer(uname, word["id"], is_correct, "arcade")
                     if is_correct:
                         st.session_state.combo += 1
                         bonus = 1 + st.session_state.combo // 3
                         st.session_state.arcade_score += 10 * bonus
+                        if arc_r["mastered"]:
+                            st.toast(f"🌟 {word['word']} 已掌握！退出闯关词库", icon="✅")
                     else:
                         st.session_state.arcade_lives -= 1
                         st.session_state.combo = 0
-                    r = handle_answer(uname, word["id"], is_correct, "arcade")
-                    st.session_state.arcade_result = (c["id"], is_correct, r)
+                    st.session_state.arcade_result = (c["id"], is_correct, r, arc_r)
                     st.session_state.arcade_answered = True
                     st.rerun()
     else:
-        chosen_id, is_correct, r = st.session_state.arcade_result
+        chosen_id, is_correct, r, arc_r = st.session_state.arcade_result
+        arc_cnt = arc_r.get("arcade_correct", 0)
         if is_correct:
             bonus = 1 + combo // 3
-            st.markdown(f'<div class="correct-banner">✅ +{10*bonus} 分！</div>',
+            mastered_hint = f" 🌟 已掌握！" if arc_r.get("mastered") else f" ({arc_cnt}/3次)"
+            st.markdown(f'<div class="correct-banner">✅ +{10*bonus} 分！{mastered_hint}</div>',
                         unsafe_allow_html=True)
             show_result_banner({**r, "correct": True})
         else:
@@ -1074,11 +1103,165 @@ elif page == "arcade":
             st.rerun()
 
 
+elif page == "topics":
+    render_hud(prof)
+    st.markdown("### 📚 分主题练习")
+
+    topic_stats = {}
+    for w in all_words:
+        t = w["topic"]
+        if t not in topic_stats:
+            topic_stats[t] = {"total": 0, "known": 0, "wrong": 0}
+        topic_stats[t]["total"] += 1
+        if all_progress.get(w["id"], {}).get("status") == "known":
+            topic_stats[t]["known"] += 1
+        if all_progress.get(w["id"], {}).get("wrong", 0) > 0:
+            topic_stats[t]["wrong"] += 1
+
+    topics = [t for t, _ in sorted(
+        topic_stats.items(),
+        key=lambda item: (item[1]["known"] / item[1]["total"], item[1]["wrong"]),
+        reverse=True
+    )]
+    sel_topic = st.selectbox("选择话题", ["全部"] + topics, key="topic_sel")
+    sel_mode = st.selectbox(
+        "练习模式",
+        ["全部词", "错题优先", "未掌握词", "学习中词", "新词"],
+        key="topic_practice_scope"
+    )
+    topic_words = all_words if sel_topic == "全部" else [w for w in all_words if w["topic"] == sel_topic]
+
+    topic_total = len(topic_words)
+    topic_known = sum(1 for w in topic_words if all_progress.get(w["id"], {}).get("status") == "known")
+    topic_learning = sum(1 for w in topic_words if all_progress.get(w["id"], {}).get("status") == "learning")
+    topic_new = topic_total - topic_known - topic_learning
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("总词数", topic_total)
+    c2.metric("已掌握", topic_known)
+    c3.metric("学习中", topic_learning)
+    st.caption(f"未开始 {topic_new} 个单词")
+
+    if topic_total > 0:
+        st.progress(topic_known / topic_total)
+
+    if topic_total == 0:
+        st.info("当前话题暂无单词，请选择其他话题。")
+    else:
+        practice_words = topic_words
+        if sel_mode == "错题优先":
+            wrong_words = [w for w in topic_words if all_progress.get(w["id"], {}).get("wrong", 0) > 0]
+            if wrong_words:
+                practice_words = sorted(
+                    wrong_words,
+                    key=lambda w: all_progress.get(w["id"], {}).get("wrong", 0),
+                    reverse=True
+                )
+                st.success(f"已优先选出 {len(wrong_words)} 个错题。")
+            else:
+                practice_words = topic_words
+                st.info("本话题暂无错题，已使用全部词进行练习。")
+        elif sel_mode == "未掌握词":
+            practice_words = [w for w in topic_words if all_progress.get(w["id"], {}).get("status") != "known"]
+        elif sel_mode == "学习中词":
+            practice_words = [w for w in topic_words if all_progress.get(w["id"], {}).get("status") == "learning"]
+        elif sel_mode == "新词":
+            practice_words = [w for w in topic_words
+                              if all_progress.get(w["id"], {}).get("status") not in ("learning", "known")]
+
+        if sel_mode != "全部词" and not practice_words:
+            st.warning("当前模式下没有可练习的词，已回退到全部词。")
+            practice_words = topic_words
+
+        if st.button("开始本话题练习", type="primary", use_container_width=True, key="topic_start"):
+            st.session_state.topic_quiz_active = True
+            st.session_state.topic_quiz_topic = sel_topic
+            st.session_state.topic_quiz_scope = sel_mode
+            st.session_state.topic_quiz_word = None
+            st.session_state.topic_quiz_choices = []
+            st.session_state.topic_quiz_answered = False
+            st.session_state.topic_quiz_result = None
+            st.rerun()
+
+        if st.session_state.topic_quiz_active:
+            if st.button("结束本话题练习", type="secondary", use_container_width=True, key="topic_stop"):
+                st.session_state.topic_quiz_active = False
+                st.session_state.topic_quiz_word = None
+                st.session_state.topic_quiz_choices = []
+                st.session_state.topic_quiz_answered = False
+                st.session_state.topic_quiz_result = None
+                st.rerun()
+
+            if (st.session_state.topic_quiz_word is None or
+                st.session_state.topic_quiz_topic != sel_topic or
+                st.session_state.topic_quiz_scope != sel_mode):
+                def _new_topic_quiz():
+                    pool = practice_words or topic_words
+                    w = random.choice(pool)
+                    same_part = [x for x in pool if x["part"] == w["part"] and x["id"] != w["id"]]
+                    distractor_pool = same_part if len(same_part) >= 3 else pool
+                    distractors = sample_distractors(w, distractor_pool, all_words, 3)
+                    choices = [w] + distractors
+                    random.shuffle(choices)
+                    st.session_state.topic_quiz_word = w
+                    st.session_state.topic_quiz_choices = choices
+                    st.session_state.topic_quiz_answered = False
+                    st.session_state.topic_quiz_result = None
+
+                _new_topic_quiz()
+
+            word = st.session_state.topic_quiz_word
+            choices = st.session_state.topic_quiz_choices
+            answered = st.session_state.topic_quiz_answered
+
+            mode = "cn2en" if word["id"] % 2 == 0 else "en2cn"
+            if mode == "cn2en":
+                st.markdown(f"""
+                <div class="quiz-question">
+                  <div class="quiz-cn">🇨🇳 {word['meaning']}</div>
+                  <div class="quiz-hint">{word['part']} · 选出对应英文单词</div>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="quiz-question">
+                  <div style="font-size:2.2rem;font-weight:900;color:#667eea">{word['word']}</div>
+                  <div style="color:#718096">{word.get('phonetic','')}</div>
+                  <div class="quiz-hint">选出这个单词的中文意思</div>
+                </div>""", unsafe_allow_html=True)
+                tts_button(word["word"], "🔊 听发音", rate=0.8, key=f"topic_tts_{word['id']}")
+
+            if not answered:
+                bcols = st.columns(2)
+                for i, c in enumerate(choices):
+                    with bcols[i % 2]:
+                        label = f"**{c['word']}**" if mode == "cn2en" else f"**{c['meaning']}**"
+                        if st.button(label, key=f"topic_{c['id']}", use_container_width=True):
+                            is_correct = (c["id"] == word["id"])
+                            r = handle_answer(uname, word["id"], is_correct, "topics")
+                            st.session_state.topic_quiz_result = (is_correct, r)
+                            st.session_state.topic_quiz_answered = True
+                            st.rerun()
+            else:
+                is_correct, r = st.session_state.topic_quiz_result
+                if is_correct:
+                    st.markdown(f'<div class="correct-banner">✅ 回答正确！</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="wrong-banner">❌ 正确答案：{word["word"]}（{word["meaning"]}）</div>', unsafe_allow_html=True)
+                show_result_banner({**r, "correct": is_correct})
+                if st.button("➡️ 下一题", type="primary", use_container_width=True, key="topic_next"):
+                    st.session_state.topic_quiz_word = None
+                    st.session_state.topic_quiz_choices = []
+                    st.session_state.topic_quiz_answered = False
+                    st.session_state.topic_quiz_result = None
+                    st.rerun()
+
+
 # ═══════════════════════════════════════════════════════
 # 页面：我的进度
 # ═══════════════════════════════════════════════════════
 
 elif page == "stats":
+    render_hud(prof)
     render_hud(prof)
     st.markdown("### 📊 我的进度")
 

@@ -30,14 +30,15 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS word_progress (
-            username    TEXT NOT NULL,
-            word_id     INTEGER NOT NULL,
-            status      TEXT NOT NULL DEFAULT 'new',
-            correct     INTEGER NOT NULL DEFAULT 0,
-            wrong       INTEGER NOT NULL DEFAULT 0,
-            last_seen   TEXT,
-            next_review TEXT,
-            streak      INTEGER NOT NULL DEFAULT 0,
+            username       TEXT NOT NULL,
+            word_id        INTEGER NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'new',
+            correct        INTEGER NOT NULL DEFAULT 0,
+            wrong          INTEGER NOT NULL DEFAULT 0,
+            last_seen      TEXT,
+            next_review    TEXT,
+            streak         INTEGER NOT NULL DEFAULT 0,
+            arcade_correct INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (username, word_id)
         );
 
@@ -352,3 +353,70 @@ def get_earned_badges(username: str) -> list:
             result.append({"id": bid, "name": name, "icon": icon,
                            "desc": desc, "earned_at": r["earned_at"]})
     return result
+
+
+def arcade_upsert(username: str, word_id: int, correct: bool) -> dict:
+    """
+    闯关游戏专属进度更新。
+    规则：累计答对3次 → status=known，同时退出闯关词库和每日计划。
+    答错不扣回，但会重置 arcade 连续答对计数（只影响闯关模式）。
+    返回: {mastered: bool, arcade_correct: int}
+    """
+    with get_conn() as conn:
+        # 确保字段存在（兼容旧数据库）
+        try:
+            conn.execute(
+                "ALTER TABLE word_progress ADD COLUMN arcade_correct INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        row = conn.execute(
+            "SELECT * FROM word_progress WHERE username=? AND word_id=?",
+            (username, word_id)
+        ).fetchone()
+        now = __import__('datetime').datetime.now().isoformat()
+
+        if row is None:
+            arc = 1 if correct else 0
+            c, w = (1, 0) if correct else (0, 1)
+            status = "learning"
+            conn.execute(
+                """INSERT INTO word_progress
+                   (username,word_id,status,correct,wrong,last_seen,next_review,streak,arcade_correct)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (username, word_id, status, c, w, now,
+                 _next_review_date(1 if correct else 0), 1 if correct else 0, arc)
+            )
+        else:
+            arc = (row["arcade_correct"] + 1) if correct else 0
+            mastered = arc >= 3
+            status = "known" if mastered else (row["status"] if row["status"] != "new" else "learning")
+            c = row["correct"] + (1 if correct else 0)
+            w = row["wrong"] + (0 if correct else 1)
+            streak = (row["streak"] + 1) if correct else 0
+            conn.execute(
+                """UPDATE word_progress
+                   SET status=?,correct=?,wrong=?,last_seen=?,next_review=?,streak=?,arcade_correct=?
+                   WHERE username=? AND word_id=?""",
+                (status, c, w, now, _next_review_date(streak), streak, arc, username, word_id)
+            )
+
+    mastered = arc >= 3
+    return {"mastered": mastered, "arcade_correct": arc}
+
+
+def get_arcade_pool(username: str, all_words: list) -> list:
+    """
+    返回闯关游戏可用词池：排除已掌握（status=known）的词。
+    若已掌握词超过80%，重置所有词（给孩子全新挑战）。
+    """
+    progress = get_all_progress(username)
+    available = [
+        w for w in all_words
+        if progress.get(w["id"], {}).get("status") != "known"
+    ]
+    # 如果可用词 < 20个，放开所有词（避免无题可出）
+    if len(available) < 20:
+        available = load_words()
+    return available
